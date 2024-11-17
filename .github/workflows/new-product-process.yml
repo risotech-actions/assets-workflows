@@ -1,0 +1,177 @@
+name: Create new Product Assets
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version'
+        default: '18'
+        required: false
+        type: string
+    secrets:
+      personal_access_token:
+        required: true
+
+env:
+  REGISTRY: 'https://npm.pkg.github.com'
+
+jobs:
+  new-product-process:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.personal_access_token }}
+
+      - name: Check branch level and format
+        id: check_branch
+        run: |
+          NEW_BRANCH="${{ github.ref_name }}"
+          if [[ "$NEW_BRANCH" == *"/"* ]]; then
+            echo "is_valid_branch=false" >> $GITHUB_OUTPUT
+            echo "skip_message=⏭️ Skipped: This branch appears to be a sub-branch (contains '/'). New packages can only be created from level 1 branches." >> $GITHUB_OUTPUT
+            echo "branch_name=$NEW_BRANCH" >> $GITHUB_OUTPUT
+          else
+            FORMATTED_NAME=$(echo "$NEW_BRANCH" | \
+              tr '[:upper:]' '[:lower:]' | \
+              sed 's/[^a-z0-9-]/-/g' | \
+              sed 's/-\+/-/g' | \
+              sed 's/^-\+//g' | \
+              sed 's/-\+$//g')
+            
+            echo "is_valid_branch=true" >> $GITHUB_OUTPUT
+            echo "skip_message=" >> $GITHUB_OUTPUT
+            echo "branch_name=$NEW_BRANCH" >> $GITHUB_OUTPUT
+            echo "package_name=$FORMATTED_NAME" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Output Branch Validation Results
+        run: |
+          if [ "${{ steps.check_branch.outputs.is_valid_branch }}" == "true" ]; then
+            echo "## ✅ Branch Validation Passed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Branch Details" >> $GITHUB_STEP_SUMMARY
+            echo "- Original Branch Name: \`${{ steps.check_branch.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Formatted Package Name: \`${{ steps.check_branch.outputs.package_name }}\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ⏭️ Package Creation Skipped" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Skip Details" >> $GITHUB_STEP_SUMMARY
+            echo "${{ steps.check_branch.outputs.skip_message }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Branch Information" >> $GITHUB_STEP_SUMMARY
+            echo "- Attempted Branch: \`${{ steps.check_branch.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Package Creation Guidelines" >> $GITHUB_STEP_SUMMARY
+            echo "1. 📦 New Packages:" >> $GITHUB_STEP_SUMMARY
+            echo "   - Created from level 1 branches (without '/')" >> $GITHUB_STEP_SUMMARY
+            echo "   - Example: \`product-name\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "2. 🔄 Feature Development:" >> $GITHUB_STEP_SUMMARY
+            echo "   - Use pattern: \`parent-features/name\`" >> $GITHUB_STEP_SUMMARY
+            echo "   - Creates beta packages via PR workflow" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Get Package Info
+        id: package_info
+        if: steps.check_branch.outputs.is_valid_branch == 'true'
+        run: |
+          # Set version YYYY.MMDD.0
+          NEW_VERSION=$(date +'%Y').$(date +'%m%d').0
+          echo "version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+      
+      - name: Setup Node.js
+        if: steps.check_branch.outputs.is_valid_branch == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          registry-url: ${{ env.REGISTRY }}
+          scope: '@${{ github.repository_owner }}'
+
+      - name: Update Package Name and Version
+        id: update_package
+        if: steps.check_branch.outputs.is_valid_branch == 'true'
+        run: |
+          jq --arg name "@${{ github.repository_owner }}/${{ steps.check_branch.outputs.package_name }}" \
+             --arg version "${{ steps.package_info.outputs.version }}" \
+             --arg repo "https://github.com/${{ github.repository }}.git" \
+             '.name = $name | .version = $version | .publishConfig.registry = env.REGISTRY | .repository.url = $repo' \
+             package.json > package.json.tmp
+          mv package.json.tmp package.json
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Create git tag
+        id: tag
+        if: steps.check_branch.outputs.is_valid_branch == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git tag -a "${{ steps.check_branch.outputs.package_name }}-v${{ steps.package_info.outputs.version }}" -m "Release v${{ steps.package_info.outputs.version }}"
+          git push origin "${{ steps.check_branch.outputs.package_name }}-v${{ steps.package_info.outputs.version }}"
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Commit and Push Changes
+        id: commit
+        if: steps.check_branch.outputs.is_valid_branch == 'true'
+        run: |
+          git add package.json
+          git commit -m "chore: update package name to @${{ github.repository_owner }}/${{ steps.check_branch.outputs.package_name }}"
+          git push
+          echo "status=success" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.personal_access_token }}
+
+      - name: Build and Publish
+        id: publish
+        if: steps.check_branch.outputs.is_valid_branch == 'true'
+        run: |
+          echo "@${{ github.repository_owner }}:registry=${{ env.REGISTRY }}" > .npmrc
+          npm install
+          npm install -g gulp-cli
+          gulp --prod
+          npm publish
+          echo "status=success" >> $GITHUB_OUTPUT
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.personal_access_token }}
+
+      - name: Output Package Creation Results
+        if: steps.check_branch.outputs.is_valid_branch == 'true'
+        run: |
+          if [ "${{ steps.publish.outputs.status }}" == "success" ]; then
+            echo "## ✅ Package Published Successfully!" >> $GITHUB_STEP_SUMMARY
+            echo "Package: @${{ github.repository_owner }}/${{ steps.check_branch.outputs.package_name }}@${{ steps.package_info.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Package Details" >> $GITHUB_STEP_SUMMARY
+            echo "- Original Branch: \`${{ steps.check_branch.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Package Name: \`@${{ github.repository_owner }}/${{ steps.check_branch.outputs.package_name }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Version: \`${{ steps.package_info.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Installation" >> $GITHUB_STEP_SUMMARY
+            echo "Install from the command line:" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+            echo "$ npm install @${{ github.repository_owner }}/${{ steps.check_branch.outputs.package_name }}@${{ steps.package_info.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Install via package.json:" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+            echo "\"@${{ github.repository_owner }}/${{ steps.check_branch.outputs.package_name }}\": \"${{ steps.package_info.outputs.version }}\"" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "[Learn more about npm packages](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ⏭️ Package Creation Skipped" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Skip Information" >> $GITHUB_STEP_SUMMARY
+            echo "The package creation process was skipped. Please check the workflow logs for details." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Attempted Package Details" >> $GITHUB_STEP_SUMMARY
+            echo "- Branch: \`${{ steps.check_branch.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Package Name: \`@${{ github.repository_owner }}/${{ steps.check_branch.outputs.package_name }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Version: \`${{ steps.package_info.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
