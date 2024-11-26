@@ -74,55 +74,8 @@ jobs:
             echo "   - Be merged into their parent branch" >> $GITHUB_STEP_SUMMARY
           fi
 
-  cleanup-beta:
-    needs: validate-merge
-    if: needs.validate-merge.outputs.is_valid_branch == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      packages: write
-    steps:
-      - name: Delete Beta Packages
-        id: cleanup
-        env:
-          GH_TOKEN: ${{ secrets.personal_access_token }}
-        run: |
-          PR_NUMBER="${{ github.event.pull_request.number }}"
-          PACKAGE_NAME="@${{ github.repository_owner }}/${{ needs.validate-merge.outputs.parent_branch }}"
-          
-          # Get all versions of the package
-          VERSIONS=$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "/user/packages/npm/${PACKAGE_NAME}/versions" --jq ".[].name")
-          
-          # Find and delete beta versions for this PR
-          for VERSION in $VERSIONS; do
-            if [[ $VERSION =~ .*-beta\.$PR_NUMBER\..* ]]; then
-              echo "Deleting beta version: $VERSION"
-              gh api \
-                --method DELETE \
-                -H "Accept: application/vnd.github+json" \
-                -H "X-GitHub-Api-Version: 2022-11-28" \
-                "/user/packages/npm/${PACKAGE_NAME}/versions/${VERSION}"
-            fi
-          done
-          
-          echo "status=success" >> $GITHUB_OUTPUT
-
-      - name: Output Cleanup Results
-        run: |
-          if [ "${{ steps.cleanup.outputs.status }}" == "success" ]; then
-            echo "## 🧹 Beta Packages Cleanup" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Successfully removed beta packages for PR #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "## ⚠️ Beta Cleanup Warning" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Some beta packages may not have been removed. Please check manually." >> $GITHUB_STEP_SUMMARY
-          fi
-
   update-version:
-    needs: [validate-merge, cleanup-beta]
+    needs: [validate-merge]
     if: needs.validate-merge.outputs.is_valid_branch == 'true'
     runs-on: ubuntu-latest
     permissions:
